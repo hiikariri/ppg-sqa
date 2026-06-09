@@ -45,7 +45,7 @@ import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks, welch
 from scipy.stats import kurtosis, skew
 
-__all__ = ["PPGSQAEngine"]
+__all__ = ["PPGSQAEngine", "optimal_threshold"]
 
 # np.trapz was renamed to np.trapezoid in NumPy 2.0.
 _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
@@ -387,3 +387,35 @@ class PPGSQAEngine:
                  label=f"{verdict}  (corr {corr_str}, HR {hr_str} bpm, "
                        f"SNR {snr_db:.1f} dB)")
         return r
+
+
+def optimal_threshold(values, labels):
+    """Threshold for a higher-is-better feature that best splits labelled data.
+
+    Given per-sample ``values`` and boolean ``labels`` (True = the "good" class),
+    predicts good when ``value >= t`` and returns ``(t, balanced_accuracy)`` for
+    the ``t`` that maximises Youden's J (sensitivity + specificity - 1). Candidate
+    thresholds are the midpoints between sorted unique values (plus the open ends).
+    Non-finite values are dropped; returns ``(nan, nan)`` if either class is empty.
+    This is what the GUI uses to auto-tune the corr / MSQI / SNR thresholds from
+    the manual eye-flags.
+    """
+    v = np.asarray(values, dtype=float)
+    y = np.asarray(labels, dtype=bool)
+    ok = np.isfinite(v)
+    v, y = v[ok], y[ok]
+    n_pos, n_neg = int(y.sum()), int((~y).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan"), float("nan")
+    uniq = np.unique(v)
+    mids = (uniq[:-1] + uniq[1:]) / 2.0 if uniq.size > 1 else uniq
+    cands = np.concatenate(([uniq[0] - 1e-9], np.atleast_1d(mids), [uniq[-1] + 1e-9]))
+    best_t, best_j = float(cands[0]), -1.0
+    for t in cands:
+        pred = v >= t
+        sens = float(np.sum(pred & y)) / n_pos
+        spec = float(np.sum(~pred & ~y)) / n_neg
+        j = sens + spec - 1.0
+        if j > best_j:
+            best_j, best_t = j, float(t)
+    return best_t, (best_j + 1.0) / 2.0

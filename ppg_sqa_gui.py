@@ -31,7 +31,7 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as Navigation
 from matplotlib.figure import Figure
 
 import ppg_datasets as ds
-from ppg_sqa import PPGSQAEngine
+from ppg_sqa import PPGSQAEngine, optimal_threshold
 
 DEFAULT_DATASET = ds.PRIMER_DIR if Path(ds.PRIMER_DIR).exists() else "."
 
@@ -154,6 +154,10 @@ class PPGSQAGui(QtWidgets.QMainWindow):
         controls.addWidget(self.snr_spin, 3, 5)
         for sp in (self.corr_spin, self.msqi_spin, self.snr_spin):
             sp.valueChanged.connect(self._on_threshold_changed)
+        self.autotune_btn = QtWidgets.QPushButton("Auto-tune ⚙")
+        self.autotune_btn.setToolTip("Set corr / MSQI / SNR thresholds from your eye-flags")
+        self.autotune_btn.clicked.connect(self.auto_tune)
+        controls.addWidget(self.autotune_btn, 3, 6)
 
         # Eye-flagging (manual ground truth) + unfit review
         controls.addWidget(QtWidgets.QLabel("Eye flag:"), 4, 0)
@@ -500,6 +504,83 @@ class PPGSQAGui(QtWidgets.QMainWindow):
                "bad": TIER_COLOR["unfit"]}[flag]
         self.flag_status.setText(text)
         self.flag_status.setStyleSheet(f"font-weight: bold; color: {col};")
+
+    # ── Auto-tune thresholds from the eye-flags ─────────────────────────────
+    def _flagged_features(self):
+        """[(beat_corr, msqi, snr_db, is_good), ...] for every flagged record."""
+        col = ds.PPG_CHANNELS[self.channel_combo.currentText()]
+        name_to_base = {n: b for b, n in self.records}
+        rows = []
+        for name, flag in self.flags.items():
+            base = name_to_base.get(name)
+            if base is None:
+                continue
+            try:
+                rec = ds.load_primer_ppg(base, channel=col)
+                res = PPGSQAEngine(rec.ppg, rec.fs).assess()
+            except Exception:
+                continue
+            rows.append((res.get("beat_corr", float("nan")),
+                         res.get("msqi", float("nan")),
+                         res.get("snr_db", float("nan")), flag == "good"))
+        return rows
+
+    def auto_tune(self):
+        """Set the corr / MSQI / SNR thresholds to best match the eye-flags.
+
+        Each criterion's threshold is placed where it best separates flagged-good
+        from flagged-bad (Youden's J); see :func:`ppg_sqa.optimal_threshold`.
+        """
+        rows = self._flagged_features()
+        labels = [r[3] for r in rows]
+        n_good, n_bad = sum(labels), len(labels) - sum(labels)
+        if n_good < 1 or n_bad < 1:
+            QtWidgets.QMessageBox.information(
+                self, "Auto-tune",
+                "Need at least one 'good' and one 'bad' eye-flag to tune "
+                f"(have {n_good} good, {n_bad} bad).\nFlag more records by eye first.")
+            return
+
+        # Tune each "higher is better" criterion to its best good/bad split, but
+        # only apply it when it actually separates the flags -- otherwise a weak
+        # feature (e.g. SNR here) gets an extreme, useless threshold.
+        MIN_SEP = 0.65
+        parts = []
+        for label, spin, idx in (("corr", self.corr_spin, 0),
+                                 ("MSQI", self.msqi_spin, 1),
+                                 ("SNR", self.snr_spin, 2)):
+            t, acc = optimal_threshold([r[idx] for r in rows], labels)
+            if np.isfinite(t) and acc >= MIN_SEP:
+                spin.blockSignals(True); spin.setValue(t); spin.blockSignals(False)
+                parts.append(f"{label} ≥ {spin.value():g} (sep {acc:.0%})")
+            else:
+                parts.append(f"{label} kept (weak sep {acc:.0%})"
+                             if np.isfinite(acc) else f"{label} n/a")
+
+        # Overall verdict-vs-flag agreement with the freshly tuned thresholds.
+        ov = self._overrides()
+        col = ds.PPG_CHANNELS[self.channel_combo.currentText()]
+        name_to_base = {n: b for b, n in self.records}
+        agree = total = 0
+        for name, flag in self.flags.items():
+            base = name_to_base.get(name)
+            if base is None:
+                continue
+            try:
+                rec = ds.load_primer_ppg(base, channel=col)
+                valid = PPGSQAEngine(rec.ppg, rec.fs, overrides=ov).assess()["valid"]
+            except Exception:
+                continue
+            total += 1
+            agree += int(valid == (flag == "good"))
+
+        self.metrics_label.setStyleSheet("font-weight: bold;")
+        self.metrics_label.setText(
+            f"Auto-tuned on {len(rows)} eye-flags ({n_good} good / {n_bad} bad):  "
+            + "  ·  ".join(parts)
+            + f"   |   verdict now matches {agree}/{total} flags")
+        if self._cur is not None:
+            self.assess_and_plot()
 
 
 def main():
