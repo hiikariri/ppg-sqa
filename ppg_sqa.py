@@ -5,28 +5,22 @@ PPG Signal Quality Assessment (SQA) from the eight signal-quality indices of
     Bioengineering 2016, 3(4), 21.
 
 The paper found the **skewness index (SSQI)** to be the single optimal SQI for
-separating excellent PPG from acceptable/unfit, with a fixed threshold of zero
-(Figure 4). This engine still computes all eight indices and a spectral SNR as
-diagnostics, but does **not** decide on skewness: its sign is confounded by
-sensor orientation (a clean but inverted pulse scores negative). The validity
-verdict instead follows an Orphanidou-2015-style rule -- repeatable beat
-morphology (template correlation) at a plausible, regular pulse rate, with SNR
-as a backstop. See :meth:`PPGSQAEngine.classify`.
+separating excellent PPG from acceptable/unfit. This engine does **not** decide
+on skewness, though: its sign is confounded by sensor orientation (a clean but
+inverted pulse scores negative), so SSQI is kept only as a diagnostic. The
+validity verdict follows an Orphanidou-2015-style rule -- repeatable beat
+morphology (template correlation) at a plausible, regular pulse rate -- with
+detector agreement (MSQI) and spectral SNR refining the "excellent" tier.
+See :meth:`PPGSQAEngine.classify`.
 
-Indices (Section 2.3 of the paper)
-----------------------------------
-    PSQI  perfusion           (y_max - y_min) / |mean(raw)| x 100   gold standard
-    SSQI  skewness            skew(y)                               OPTIMAL, thr = 0
-    KSQI  kurtosis            Pearson kurtosis of y
-    ESQI  entropy             -sum p^2 ln p^2   (energy-normalised)
-    ZSQI  zero crossing       fraction of y < 0, x 100              lower better
-    NSQI  signal-to-noise     var(|y|) / var(y)                     paper's SNR index
-    MSQI  detector matching   |Bing ∩ Billauer| / |Bing| x 100      higher better
-    RSQI  relative power      P(1-2.25 Hz) / P(0-8 Hz)              higher better
+Of Elgendi's eight SQIs (Section 2.3) only the two this engine still uses are
+computed:
+    SSQI  skewness            skew(y)                               diagnostic only
+    MSQI  detector matching   |Bing ∩ Billauer| / |Bing| x 100      "excellent" gate
 
-``y`` is the band-pass filtered PPG (0.5-8 Hz); the raw signal keeps its DC term
-only where the paper's formula calls for it (PSQI mean). A practical spectral
-SNR (dB) around the dominant pulse frequency is reported alongside NSQI.
+``y`` is the band-pass filtered PPG (0.5-8 Hz) used by the detectors and the
+beat-template correlation; the DC-bearing raw signal feeds the full-band
+spectral SNR (dB) reported around the dominant pulse frequency.
 
 Usage
 -----
@@ -43,12 +37,9 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks, welch
-from scipy.stats import kurtosis, skew
+from scipy.stats import skew
 
 __all__ = ["PPGSQAEngine", "optimal_threshold"]
-
-# np.trapz was renamed to np.trapezoid in NumPy 2.0.
-_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
 
 class PPGSQAEngine:
@@ -87,7 +78,7 @@ class PPGSQAEngine:
         raw_full = np.asarray(ppg, dtype=float)
         filt_full = self._filter(raw_full)
         # Drop the sensor-settling onset (and the symmetric tail) so a warm-up
-        # transient cannot inflate skewness / spawn a phantom peak; genuine
+        # transient or filter edge can't spawn a phantom peak; genuine
         # mid-recording motion artifacts are left intact for the SQIs to catch.
         trim = int(self.EDGE_TRIM_S * self.fs)
         if trim > 0 and raw_full.size > 4 * trim:
@@ -142,55 +133,10 @@ class PPGSQAEngine:
                 peaks.append(u + int(np.argmax(seg)))
         return np.array(sorted(set(peaks)), dtype=int)
 
-    # ── The eight SQIs ─────────────────────────────────────────────────────
-    def perfusion(self):
-        """PSQI: pulsatile range over DC level (gold-standard perfusion index)."""
-        y = self.filtered
-        dc = abs(float(np.mean(self.raw)))
-        if dc == 0:
-            return 0.0
-        return float((y.max() - y.min()) / dc * 100.0)
-
+    # ── SQIs (only the two the engine still uses) ───────────────────────────
     def skewness(self):
-        """SSQI: skewness of the AC signal (the paper's optimal index)."""
+        """SSQI: skewness of the AC signal (kept as a diagnostic only)."""
         return float(skew(self.filtered))
-
-    def kurtosis_(self):
-        """KSQI: Pearson kurtosis of the AC signal (~3 = Gaussian)."""
-        return float(kurtosis(self.filtered, fisher=False))
-
-    def entropy(self):
-        """ESQI: energy-distribution entropy, -sum p^2 ln p^2 with p energy-norm."""
-        y = self.filtered
-        e = float(np.sum(y ** 2))
-        if e == 0:
-            return 0.0
-        p2 = (y ** 2) / e                                  # normalised energy, sums to 1
-        nz = p2 > 0
-        return float(-np.sum(p2[nz] * np.log(p2[nz])))
-
-    def zero_crossing(self):
-        """ZSQI: fraction of filtered samples below zero, as a percent (Eq. 6)."""
-        y = self.filtered
-        return float(np.mean(y < 0) * 100.0) if y.size else 0.0
-
-    def nsqi(self):
-        """NSQI: the paper's SNR index, var(|y|) / var(y) (Eq. 7)."""
-        y = self.filtered
-        v = float(np.var(y))
-        if v == 0:
-            return 0.0
-        return float(np.var(np.abs(y)) / v)
-
-    def relative_power(self):
-        """RSQI: cardiac-band (1-2.25 Hz) power over total 0-8 Hz power (Eq. 9)."""
-        f, pxx = self._psd()
-        total = _trapz(pxx[(f >= 0) & (f <= 8)], f[(f >= 0) & (f <= 8)])
-        if total <= 0:
-            return 0.0
-        band = (f >= 1.0) & (f <= 2.25)
-        num = _trapz(pxx[band], f[band])
-        return float(num / total)
 
     def msqi(self):
         """MSQI: agreement between the Bing and Billauer systolic detectors."""
@@ -204,13 +150,6 @@ class PPGSQAEngine:
         return float(matched / bing.size * 100.0)
 
     # ── Spectra ────────────────────────────────────────────────────────────
-    def _psd(self):
-        """PSD of the band-pass filtered signal (used for RSQI, 0-8 Hz)."""
-        y = self.filtered
-        nper = int(min(y.size, max(256, 4 * self.fs)))
-        f, pxx = welch(y, fs=self.fs, nperseg=nper)
-        return f, pxx
-
     def _raw_psd(self):
         """Full-band PSD of the DC-removed raw signal (up to Nyquist).
 
@@ -308,16 +247,8 @@ class PPGSQAEngine:
 
     # ── Full assessment ────────────────────────────────────────────────────
     def compute_sqi(self):
-        return {
-            "PSQI": self.perfusion(),
-            "SSQI": self.skewness(),
-            "KSQI": self.kurtosis_(),
-            "ESQI": self.entropy(),
-            "ZSQI": self.zero_crossing(),
-            "NSQI": self.nsqi(),
-            "MSQI": self.msqi(),
-            "RSQI": self.relative_power(),
-        }
+        """The SQIs the engine still uses: SSQI (diagnostic) and MSQI (decision)."""
+        return {"SSQI": self.skewness(), "MSQI": self.msqi()}
 
     def classify(self, m):
         """Validity tier from pulse morphology + rate, refined by MSQI and SNR.
