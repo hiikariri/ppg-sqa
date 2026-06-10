@@ -297,13 +297,13 @@ class PPGSQAGui(QtWidgets.QMainWindow):
         # 1) PPG trace + detected peaks (time axis offset by the trimmed warm-up)
         start = res.get("start_idx", 0)
         ts = t[start:start + y.size]
-        ax_ppg.plot(ts, y, lw=0.8, color="tab:blue", label="PPG (0.5–8 Hz)")
+        ax_ppg.plot(ts, y, lw=0.8, color="tab:blue", label="PPG")
         peaks = res.get("peaks")
         if peaks is not None and len(peaks):
             ax_ppg.scatter(ts[peaks], y[peaks], s=28, c="tab:red", marker="v",
-                           zorder=3, label=f"systolic peaks ({len(peaks)})")
-        ax_ppg.set_title(f"{ds.short_label(name)} — {res['label']}", color=color)
-        ax_ppg.set_xlabel("Time (s)"); ax_ppg.set_ylabel("PPG (filtered)")
+                           zorder=3, label=f"Systolic Peaks ({len(peaks)})")
+        ax_ppg.set_title(f"PPG — {res['label']}", color=color)
+        ax_ppg.set_xlabel("Time (s)"); ax_ppg.set_ylabel("Amplitude")
         ax_ppg.grid(alpha=0.3); ax_ppg.legend(loc="upper right", fontsize=8)
         self._ppg_ax = ax_ppg
         self._ppg_tmax = float(ts[-1]) if ts.size else 0.0
